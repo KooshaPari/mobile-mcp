@@ -15,6 +15,7 @@ import { isScalingAvailable, Image } from "./image-utils";
 import { Mobilecli } from "./mobilecli";
 import { MobileDevice } from "./mobile-device";
 import { validateOutputPath, validateFileExtension } from "./utils";
+import { EidolonTransport, tryEidolon, NullEidolonTransport, type EidolonCallRequest, type EidolonCallResponse, type EidolonMethod } from "./eidolon-shim.js";
 
 const ALLOWED_SCREENSHOT_EXTENSIONS = [".png", ".jpg", ".jpeg"];
 const ALLOWED_RECORDING_EXTENSIONS = [".mp4"];
@@ -151,6 +152,41 @@ export const createMcpServer = (): McpServer => {
 	const agentVerifiedSimulators = new Set<string>();
 	posthog("launch", {}).then();
 
+	/**
+	 * Eidolon transport — defaults to NullEidolonTransport (no-op).
+	 * Set EIDOLON_MCP_URL to point at a running Eidolon MCP server to
+	 * delegate 7 tools to Eidolon instead of the native mobile-cli adapter.
+	 */
+	const eidolonTransport: EidolonTransport = (() => {
+		const url = process.env.EIDOLON_MCP_URL;
+		if (!url) return NullEidolonTransport;
+		trace(`Eidolon transport configured at ${url}`);
+		return {
+			async call<T = unknown>(req: EidolonCallRequest): Promise<EidolonCallResponse<T>> {
+				try {
+					const response = await fetch(url, {
+						method: "POST",
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify(req),
+					});
+					if (!response.ok) return { ok: false, error: `HTTP ${response.status}` };
+					const data = await response.json();
+					return { ok: true, value: data as T };
+				} catch (err: any) {
+					return { ok: false, error: err.message };
+				}
+			},
+			async isAvailable(): Promise<boolean> {
+				try {
+					const response = await fetch(url, { method: "HEAD" });
+					return response.ok;
+				} catch {
+					return false;
+				}
+			},
+		};
+	})();
+
 	const ensureMobilecliAvailable = (): void => {
 		try {
 			const version = mobilecli.getVersion();
@@ -224,6 +260,12 @@ export const createMcpServer = (): McpServer => {
 			// from today onward, we must have mobilecli working
 			ensureMobilecliAvailable();
 
+			// Try Eidolon for additional device sources
+			const eidolonDevicesResult = await tryEidolon<{ devices: MobilecliDevice[] }>(
+				eidolonTransport,
+				{ method: "list_devices" }
+			);
+
 			const iosManager = new IosManager();
 			const androidManager = new AndroidDeviceManager();
 			const devices: MobilecliDevice[] = [];
@@ -274,6 +316,24 @@ export const createMcpServer = (): McpServer => {
 						version: device.version,
 						state: "online",
 					});
+				}
+			}
+
+			// Merge Eidolon results (deduplicate by device id)
+			if (eidolonDevicesResult !== null && Array.isArray(eidolonDevicesResult.devices)) {
+				const existingIds = new Set(devices.map(d => d.id));
+				for (const ed of eidolonDevicesResult.devices) {
+					if (!existingIds.has(ed.id)) {
+						devices.push({
+							id: ed.id,
+							name: ed.name || ed.id,
+							platform: ed.platform || "unknown",
+							type: ed.type || "emulator",
+							version: ed.version || "",
+							state: ed.state || "online",
+						});
+						existingIds.add(ed.id);
+					}
 				}
 			}
 
@@ -416,6 +476,13 @@ export const createMcpServer = (): McpServer => {
 		},
 		{ readOnlyHint: true },
 		async ({ device }) => {
+			const eidolonResult = await tryEidolon(
+				eidolonTransport,
+				{ method: "viewport", params: { device } }
+			);
+			if (eidolonResult !== null) {
+				return JSON.stringify(eidolonResult);
+			}
 			const robot = getRobotFromDevice(device);
 			const screenSize = await robot.getScreenSize();
 			return `Screen size is ${screenSize.width}x${screenSize.height} pixels`;
@@ -433,6 +500,13 @@ export const createMcpServer = (): McpServer => {
 		},
 		{ destructiveHint: true },
 		async ({ device, x, y }) => {
+			const eidolonResult = await tryEidolon(
+				eidolonTransport,
+				{ method: "tap", params: { x, y } }
+			);
+			if (eidolonResult !== null) {
+				return JSON.stringify(eidolonResult);
+			}
 			const robot = getRobotFromDevice(device);
 			await robot.tap(x, y);
 			return `Clicked on screen at coordinates: ${x}, ${y}`;
@@ -524,6 +598,13 @@ export const createMcpServer = (): McpServer => {
 		},
 		{ destructiveHint: true },
 		async ({ device, button }) => {
+			const eidolonResult = await tryEidolon(
+				eidolonTransport,
+				{ method: "press_button", params: { button } }
+			);
+			if (eidolonResult !== null) {
+				return JSON.stringify(eidolonResult);
+			}
 			const robot = getRobotFromDevice(device);
 			await robot.pressButton(button);
 			return `Pressed the button: ${button}`;
@@ -564,6 +645,13 @@ export const createMcpServer = (): McpServer => {
 		},
 		{ destructiveHint: true },
 		async ({ device, direction, x, y, distance }) => {
+			const eidolonResult = await tryEidolon(
+				eidolonTransport,
+				{ method: "swipe", params: { direction, x, y, distance } }
+			);
+			if (eidolonResult !== null) {
+				return JSON.stringify(eidolonResult);
+			}
 			const robot = getRobotFromDevice(device);
 
 			if (x !== undefined && y !== undefined) {
@@ -590,6 +678,13 @@ export const createMcpServer = (): McpServer => {
 		},
 		{ destructiveHint: true },
 		async ({ device, text, submit }) => {
+			const eidolonResult = await tryEidolon(
+				eidolonTransport,
+				{ method: "type_text", params: { text } }
+			);
+			if (eidolonResult !== null) {
+				return JSON.stringify(eidolonResult);
+			}
 			const robot = getRobotFromDevice(device);
 			await robot.sendKeys(text);
 
@@ -636,6 +731,21 @@ export const createMcpServer = (): McpServer => {
 		},
 		async ({ device }) => {
 			try {
+				// Try Eidolon first
+				const eidolonResult = await tryEidolon<{ data: string; mimeType?: string }>(
+					eidolonTransport,
+					{ method: "screenshot", params: { device } }
+				);
+				if (eidolonResult !== null) {
+					const imgData = typeof eidolonResult === "string"
+						? eidolonResult
+						: (eidolonResult as any).data || (eidolonResult as any).base64 || "";
+					const mime = (eidolonResult as any)?.mimeType || "image/png";
+					return {
+						content: [{ type: "image", data: imgData, mimeType: mime }]
+					};
+				}
+
 				const robot = getRobotFromDevice(device);
 				const screenSize = await robot.getScreenSize();
 
