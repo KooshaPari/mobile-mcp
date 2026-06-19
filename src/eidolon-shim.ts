@@ -103,8 +103,8 @@ export function translateToolInvocation(
  * dependency; consumers inject a real transport when available.
  */
 export const NullEidolonTransport: EidolonTransport = {
-  async call(): Promise<EidolonCallResponse> {
-    return { ok: false, error: "Eidolon transport not configured" };
+  async call<T = unknown>(_req: EidolonCallRequest): Promise<EidolonCallResponse<T>> {
+    return { ok: false, error: "Eidolon transport not configured" } as EidolonCallResponse<T>;
   },
   async isAvailable(): Promise<boolean> {
     return false;
