@@ -1,5 +1,7 @@
 # Subsystems — mobile-mcp
 
+ADR-038 cross-link: see [ADR-038: Hexagonal port-adapter L4 policy](https://github.com/KooshaPari/phenotype/blob/main/docs/adr/2026-06-18/ADR-038-hexagonal-port-adapter-l4-policy.md) for the canonical input/output port contract.
+
 > L7 subsystem decomposition. Bounded contexts, ports, owned data, external
 > dependencies, and failure modes for the mobile-mcp MCP server (fork of
 > mobile-next/mobile-mcp with the Eidolon delegation shim). Companion to
